@@ -11,6 +11,7 @@ class CRM_Payments_Form_Failedpayment extends CRM_Core_Form {
   public function buildQuickForm() {
 
     $this->add('textarea', 'trns_ids', ts('Transaction IDS'), ["cols" => 100, "rows" => 10], TRUE);
+    $this->addElement('checkbox', 'download_csv', ts('Download Processed Data'));
     $this->addButtons([
       [
         'type' => 'submit',
@@ -50,6 +51,9 @@ class CRM_Payments_Form_Failedpayment extends CRM_Core_Form {
                 $contactID = $output['c'];
                 $lineData['cid'] = $contactID;
               }
+              else {
+                $lineData['cid'] = '';
+              }
               try {
                 $resultNotificationLog = civicrm_api3('NotificationLog', 'retry', [
                   'system_log_id' => $value['id'],
@@ -86,11 +90,34 @@ class CRM_Payments_Form_Failedpayment extends CRM_Core_Form {
           $lineData['status'] = 'NF';
         }
       }
-      $fileName = 'Processed_Payment.csv';
-      $columnsHeader = ['Trns ID', 'Contact ID', 'Status'];
-
-      CRM_Core_Report_Excel::writeCSVFile($fileName, $columnsHeader, $finalReport);
-      exit;
+      if (!empty($values['download_csv'])) {
+        $fileName = 'Processed_Payment.csv';
+        $columnsHeader = ['Trns ID', 'Contact ID', 'Status'];
+        CRM_Core_Report_Excel::writeCSVFile($fileName, $columnsHeader, $finalReport);
+        exit;
+      }
+      else {
+        $htm = '<table class="selector">
+        <tr>
+        <th>Trns ID</th>
+        <th>Contact ID</th>
+        <th>Status</th>
+        </tr>';
+        foreach ($finalReport as $report) {
+          $htm .= '<tr>';
+          $htm .= '<td>' . $report['trxid'] . '</td>';
+          if (!empty($report['cid'])) {
+            $url = CRM_Utils_System::url("civicrm/contact/view", "reset=1&cid=" . $report['cid']);
+            $report['cid'] = "<a href='{$url}' target='_blank'>" . $report['cid'] . "</a>";
+          }
+          $htm .= '<td>' . $report['cid'] . '</td>';
+          $htm .= '<td>' . $report['status'] . '</td>';
+          $htm .= '</tr>';
+        }
+        $htm .= '</table>';
+        $smarty = CRM_Core_Smarty::singleton();
+        $smarty->assign('reportData', $htm);
+      }
     }
     parent::postProcess();
   }
