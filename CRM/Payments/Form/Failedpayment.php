@@ -12,6 +12,7 @@ class CRM_Payments_Form_Failedpayment extends CRM_Core_Form {
 
     $this->add('textarea', 'trns_ids', ts('Transaction IDS'), ["cols" => 100, "rows" => 10], TRUE);
     $this->addElement('checkbox', 'download_csv', ts('Download Processed Data'));
+    $this->addElement('checkbox', 'debug', ts('Debug?'));
     $this->addButtons([
       [
         'type' => 'submit',
@@ -58,7 +59,9 @@ class CRM_Payments_Form_Failedpayment extends CRM_Core_Form {
                 $resultNotificationLog = civicrm_api3('NotificationLog', 'retry', [
                   'system_log_id' => $value['id'],
                 ]);
-
+                if (!empty($values['debug'])) {
+                  echo '<pre>NotificationLog : '; print_r($resultNotificationLog); echo '</pre>';
+                }
                 if (!$resultNotificationLog['is_error']) {
                   $lineData['status'] = 'Processed';
                 }
@@ -72,7 +75,15 @@ class CRM_Payments_Form_Failedpayment extends CRM_Core_Form {
                 }
               }
               catch (CiviCRM_API3_Exception $e) {
-                $lineData['status'] = 'Not Found';
+                if (!empty($values['debug'])) {
+                  echo '<pre>debug 1 getMessage : '; print_r($e->getMessage()); echo '</pre>';
+                }
+                if ($e->getMessage() == 'This transaction has already been processed') {
+                  $lineData['status'] = 'Already Processed';
+                }
+                else {
+                  $lineData['status'] = 'Not Found 1';
+                }
                 if (empty($contactID)) {
                   $lineData['cid'] = '';
                 }
@@ -81,13 +92,16 @@ class CRM_Payments_Form_Failedpayment extends CRM_Core_Form {
           }
           else {
             $lineData['cid'] = '';
-            $lineData['status'] = 'Not Found';
+            $lineData['status'] = 'Not Found 2';
           }
           $finalReport[] = $lineData;
         }
         catch (CiviCRM_API3_Exception $e) {
           $lineData['cid'] = '';
-          $lineData['status'] = 'NF';
+          $lineData['status'] = 'Not Found 3';
+          if (!empty($values['debug'])) {
+            echo '<pre>debug 3 getMessage'; print_r($e->getMessage()); echo '</pre>';
+          }
         }
       }
       if (!empty($values['download_csv'])) {
