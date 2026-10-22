@@ -57,5 +57,4 @@ function payments_civicrm_navigationMenu(&$menu) {
     'operator' => 'OR',
     'separator' => 0,
   ]);
-  _payments_civix_navigationMenu($menu);
 }
