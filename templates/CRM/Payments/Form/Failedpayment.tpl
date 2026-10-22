@@ -1,6 +1,6 @@
 <div class="help">
   <p>{ts 1=$maxIds}Paste transaction IDs, separated by spaces, commas or new lines (at most %1 at a time). Each ID is looked up in the logged payment notifications (civicrm_system_log), and every notification that contains it is replayed with the NotificationLog retry API.{/ts}</p>
-  <p>{ts}Only PayPal, PayPal Standard and legacy Authorize.Net notifications can be replayed. For Stripe use the Stripe.Ipn API; for Stripe and the Authorize.Net (authnet) extension, use the payment processor webhook retry. Notifications whose payment is already recorded, and notifications of another domain's processor, are skipped.{/ts}</p>
+  <p>{ts}Only PayPal, PayPal Standard and legacy Authorize.Net notifications can be replayed. For Stripe use the Stripe.Ipn API; for Stripe and the Authorize.Net (authnet) extension, use the payment processor webhook retry. Matching notifications are replayed once each, oldest first. Notifications whose payment is already recorded, or that belong to another domain, are skipped.{/ts}</p>
 </div>
 {foreach from=$elementNames item=elementName}
   <div class="crm-section">

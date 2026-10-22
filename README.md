@@ -65,11 +65,17 @@ cv en payments
 An ID matches a logged notification only when it appears there as a complete
 value (for example `txn_id`, `parent_txn_id` or `recurring_payment_id`), never
 as part of a longer value. A recurring profile ID such as `I-…` matches every
-notification of that profile. Every matching notification is checked and,
-where safe, replayed in log order. Each one gets its own row in the result.
+notification of that profile.
 
-Run the retry from the site of the domain whose processor received the
-notification.
+Matching notifications are processed once each, in the order they were logged,
+across all the pasted IDs. Order matters for PayPal Pro: while a series' first
+contribution is pending, PayPal Pro applies the replayed payment to it. Each
+notification gets its own row in the result.
+
+Run the retry from the site of the domain the payment belongs to: the domain of
+its recurring series, or, for a payment outside a series, the domain of the
+processor that received the notification. PayPal sometimes sent a series'
+notifications to another domain's IPN URL.
 
 ## Results
 
@@ -77,7 +83,7 @@ notification.
 | --- | --- |
 | Not found | No PayPal or legacy Authorize.Net notification in the log has this ID. |
 | Unreadable log entry | The logged notification is empty or not valid JSON. Not replayed. |
-| Other domain | The notification was received by another domain's processor. Not replayed; run the retry from that domain's site. |
+| Other domain | The payment's recurring series (or, without a series, the processor that received the notification) belongs to another domain. Not replayed; run the retry from that domain's site. |
 | Already recorded | A contribution, or a payment on a contribution, already has the notification's transaction ID (`txn_id` / `x_trans_id`). Not replayed. |
 | Possibly recorded | PayPal Pro recurring payment: the same recurring series has a completed contribution with the same amount, no transaction ID and a receive date within a day. Not replayed, because PayPal Pro would record it again. Record it manually if it really is a different payment. |
 | Processed | Replayed, and a contribution now has the transaction ID. |
@@ -92,8 +98,12 @@ Notes:
 * The `com.skvare.memberships` signup-page session flags are cleared during a
   replay. Otherwise that extension removes the line items of a replayed
   installment.
-* "Processor" shows `(domain not checked)` for notifications logged as
-  `processor_name=…`, which carry no processor ID.
+* When a notification has neither a processor ID (it was logged as
+  `processor_name=…`) nor a recurring series, its domain cannot be checked.
+  The Detail column says so.
+* A "Processed" row can still show handler output such as "Invalid or missing
+  data". The payment was recorded, but core failed afterwards. For example,
+  PayPal Pro needs a `profile_status` that some logged notifications lack.
 
 ## Known limitations
 

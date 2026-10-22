@@ -31,8 +31,12 @@ CiviCRM 6.16 / PHP 8.3 review. Requires CiviCRM 6.16+ and PHP 8.2+.
   notification caused a `TypeError`. It is now reported as
   "Unreadable log entry". A missing contact in `rp_invoice_id` no longer
   raises a warning.
-* **Replays across domains.** A notification received by another domain's
-  processor is no longer replayed under the current domain.
+* **Replays across domains.** A payment whose recurring series belongs to
+  another domain is no longer replayed under the current domain. A payment
+  outside a series is checked against the processor that received it.
+* **Replay order and duplicates.** Notifications are replayed once each, in the
+  order they were logged, across all pasted IDs. Before, they ran in paste
+  order, and a notification matched by two pasted IDs ran twice.
 * **Line items removed from replayed installments.** The
   `com.skvare.memberships` signup session flags are cleared during a replay.
 * **Processor output above the page.** What the notification handler prints is

@@ -151,15 +151,23 @@ class CRM_Payments_Form_Failedpayment extends CRM_Core_Form {
 
   public function postProcess() {
     $values = $this->exportValues();
-    $finalReport = [];
+    $finalReport = $matches = [];
     foreach (self::findLogEntries(self::parseTransactionIds($values['trns_ids'] ?? '')) as $trnxID => $entries) {
       if (!$entries) {
         $finalReport[] = self::reportRow($trnxID, NULL, E::ts('Not found'), E::ts('No PayPal or legacy Authorize.Net notification in the log has this ID. Stripe and Authorize.Net (authnet extension) notifications cannot be replayed here: use the Stripe.Ipn API or the payment processor webhook retry.'));
-        continue;
       }
+      // A notification can contain several of the pasted IDs (e.g. txn_id
+      // and recurring_payment_id); replay it once.
       foreach ($entries as $entry) {
-        $finalReport[] = $this->processLogEntry($trnxID, $entry, !empty($values['debug']));
+        $matches[$entry['id']]['entry'] = $entry;
+        $matches[$entry['id']]['ids'][] = $trnxID;
       }
+    }
+    // Replay in the order the notifications arrived: PayPal Pro applies a
+    // payment to the series' first contribution while that is pending.
+    ksort($matches);
+    foreach ($matches as $match) {
+      $finalReport[] = $this->processLogEntry(implode(', ', $match['ids']), $match['entry'], !empty($values['debug']));
     }
     if (!empty($values['download_csv'])) {
       $columns = [E::ts('Transaction ID'), E::ts('Log ID'), E::ts('Log Date'), E::ts('Processor'), E::ts('Contact ID'), E::ts('Status'), E::ts('Detail')];
@@ -174,7 +182,7 @@ class CRM_Payments_Form_Failedpayment extends CRM_Core_Form {
    * Replay one logged notification, unless it must be skipped.
    *
    * @param string $trnxID
-   *   The pasted transaction ID that matched this log entry.
+   *   The pasted transaction ID(s) that matched this log entry.
    * @param array $entry
    *   civicrm_system_log row: id, message, context, timestamp.
    * @param bool $debug
@@ -188,12 +196,25 @@ class CRM_Payments_Form_Failedpayment extends CRM_Core_Form {
       return self::reportRow($trnxID, $entry, E::ts('Unreadable log entry'), E::ts('The logged notification could not be decoded.'));
     }
     $contactID = '';
+    $recurID = 0;
     if (!empty($context['rp_invoice_id']) && is_string($context['rp_invoice_id'])) {
       parse_str($context['rp_invoice_id'], $invoice);
       $contactID = $invoice['c'] ?? '';
+      $recurID = (int) ($invoice['r'] ?? 0);
     }
+    // The payment belongs to the domain of its recurring series. PayPal can
+    // send a series' notifications to another domain's IPN URL, so the
+    // processor in the log message only counts when there is no series.
+    $recurDomainID = $recurID ? (int) CRM_Core_DAO::singleValueQuery('
+      SELECT pp.domain_id
+      FROM civicrm_contribution_recur r
+      INNER JOIN civicrm_payment_processor pp ON pp.id = r.payment_processor_id
+      WHERE r.id = %1', [1 => [$recurID, 'Integer']]) : 0;
     $processor = self::getProcessor($entry['message']);
-    if ($processor['domain_id'] && $processor['domain_id'] != CRM_Core_Config::domainID()) {
+    if ($recurDomainID && $recurDomainID != CRM_Core_Config::domainID()) {
+      return self::reportRow($trnxID, $entry, E::ts('Other domain'), E::ts('Recurring contribution %1 belongs to domain %2. Run the retry from that site.', [1 => $recurID, 2 => $recurDomainID]), $contactID);
+    }
+    if (!$recurDomainID && $processor['domain_id'] && $processor['domain_id'] != CRM_Core_Config::domainID()) {
       return self::reportRow($trnxID, $entry, E::ts('Other domain'), E::ts('Processor %1 belongs to domain %2. Run the retry from that site.', [1 => $processor['id'], 2 => $processor['domain_id']]), $contactID);
     }
 
@@ -230,6 +251,9 @@ class CRM_Payments_Form_Failedpayment extends CRM_Core_Form {
     }
     if ($output !== '') {
       $detail .= ' ' . E::ts('Output: %1', [1 => $debug ? $output : CRM_Utils_String::ellipsify($output, 200)]);
+    }
+    if (!$recurDomainID && !$processor['domain_id']) {
+      $detail .= ' ' . E::ts('Domain not checked: the notification has no processor ID or recurring contribution.');
     }
     Civi::log()->info('Bulk payment retry by contact {user}: system log {log} ({trxn}): {status}. {detail}', [
       'user' => CRM_Core_Session::getLoggedInContactID(),
@@ -396,7 +420,9 @@ class CRM_Payments_Form_Failedpayment extends CRM_Core_Form {
     $processorLabel = '';
     if ($processor) {
       $processorLabel = $processor['id'] ? "{$processor['type']} #{$processor['id']}" : $processor['type'];
-      $processorLabel .= ' ' . ($processor['domain_id'] ? E::ts('(domain %1)', [1 => $processor['domain_id']]) : E::ts('(domain not checked)'));
+      if ($processor['domain_id']) {
+        $processorLabel .= ' ' . E::ts('(domain %1)', [1 => $processor['domain_id']]);
+      }
     }
     return [
       'trxid' => $trnxID,
