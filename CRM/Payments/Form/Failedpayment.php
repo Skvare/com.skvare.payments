@@ -263,6 +263,15 @@ class CRM_Payments_Form_Failedpayment extends CRM_Core_Form {
    *   [output echoed by the IPN class, error message or ''].
    */
   protected function replay(int $logID): array {
+    // com.skvare.memberships (memberships_civicrm_pre) strips the line items
+    // of signup-page contributions saved while these session keys are set,
+    // and a replay runs in the admin's session. Clear them for the replay.
+    $session = CRM_Core_Session::singleton();
+    $saved = [];
+    foreach (['membership_custom_signup', 'membership_custom_signup_page'] as $key) {
+      $saved[$key] = $session->get($key);
+      $session->set($key, NULL);
+    }
     $error = '';
     ob_start();
     try {
@@ -270,6 +279,11 @@ class CRM_Payments_Form_Failedpayment extends CRM_Core_Form {
     }
     catch (\Throwable $e) {
       $error = $e->getMessage();
+    }
+    finally {
+      foreach ($saved as $key => $value) {
+        $session->set($key, $value);
+      }
     }
     $output = trim(strip_tags((string) ob_get_clean()));
     return [$output, $error];
