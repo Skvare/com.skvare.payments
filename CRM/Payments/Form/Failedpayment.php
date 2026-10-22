@@ -3,7 +3,11 @@
 use CRM_Payments_ExtensionUtil as E;
 
 /**
- * Form controller class
+ * Bulk retry of logged payment notifications.
+ *
+ * Finds the PayPal and legacy Authorize.Net notifications logged in
+ * civicrm_system_log for pasted transaction IDs, and replays them with
+ * NotificationLog.retry (nz.co.fuzion.notificationlog).
  *
  * @see https://docs.civicrm.org/dev/en/latest/framework/quickform/
  */
@@ -21,9 +25,9 @@ class CRM_Payments_Form_Failedpayment extends CRM_Core_Form {
 
   public function buildQuickForm() {
 
-    $this->add('textarea', 'trns_ids', ts('Transaction IDS'), ["cols" => 100, "rows" => 10], TRUE);
-    $this->addElement('checkbox', 'download_csv', ts('Download Processed Data'));
-    $this->addElement('checkbox', 'debug', ts('Debug?'));
+    $this->add('textarea', 'trns_ids', E::ts('Transaction IDs'), ['cols' => 100, 'rows' => 10], TRUE);
+    $this->addElement('checkbox', 'download_csv', E::ts('Download Processed Data'));
+    $this->addElement('checkbox', 'debug', E::ts('Debug (show full processor output)'));
     $this->addButtons([
       [
         'type' => 'submit',
@@ -36,6 +40,8 @@ class CRM_Payments_Form_Failedpayment extends CRM_Core_Form {
 
     // export form elements
     $this->assign('elementNames', $this->getRenderableElementNames());
+    $this->assign('maxIds', self::MAX_IDS);
+    $this->assign('reportRows', []);
     parent::buildQuickForm();
   }
 
@@ -155,31 +161,12 @@ class CRM_Payments_Form_Failedpayment extends CRM_Core_Form {
         $finalReport[] = $this->processLogEntry($trnxID, $entry, !empty($values['debug']));
       }
     }
-    $columns = [E::ts('Transaction ID'), E::ts('Log ID'), E::ts('Log Date'), E::ts('Processor'), E::ts('Contact ID'), E::ts('Status'), E::ts('Detail')];
     if (!empty($values['download_csv'])) {
-      CRM_Core_Report_Excel::writeCSVFile('Processed_Payment.csv', $columns, $finalReport);
-      exit;
+      $columns = [E::ts('Transaction ID'), E::ts('Log ID'), E::ts('Log Date'), E::ts('Processor'), E::ts('Contact ID'), E::ts('Status'), E::ts('Detail')];
+      CRM_Core_Report_Excel::writeCSVFile('Processed_Payment', $columns, $finalReport);
+      CRM_Utils_System::civiExit();
     }
-    $htm = '<table class="selector"><tr>';
-    foreach ($columns as $column) {
-      $htm .= '<th>' . htmlspecialchars($column) . '</th>';
-    }
-    $htm .= '</tr>';
-    foreach ($finalReport as $report) {
-      $htm .= '<tr>';
-      foreach ($report as $key => $value) {
-        $cell = htmlspecialchars((string) $value);
-        if ($key === 'contact_id' && $value) {
-          $url = CRM_Utils_System::url('civicrm/contact/view', 'reset=1&cid=' . (int) $value);
-          $cell = "<a href='{$url}' target='_blank'>{$cell}</a>";
-        }
-        $htm .= '<td>' . $cell . '</td>';
-      }
-      $htm .= '</tr>';
-    }
-    $htm .= '</table>';
-    $smarty = CRM_Core_Smarty::singleton();
-    $smarty->assign('reportData', $htm);
+    $this->assign('reportRows', $finalReport);
     parent::postProcess();
   }
 
