@@ -50,9 +50,9 @@ function payments_civicrm_enable() {
  */
 function payments_civicrm_navigationMenu(&$menu) {
   _payments_civix_insert_navigation_menu($menu, 'Contributions', [
-    'label' => E::ts('Bulk Payment retry'),
+    'label' => E::ts('Bulk Payment Retry'),
     'name' => 'bulk_payment_retry',
-    'url' => CRM_Utils_System::url('civicrm/failedpayment/retry', 'reset=1'),
+    'url' => 'civicrm/failedpayment/retry?reset=1',
     'permission' => 'administer CiviCRM',
     'operator' => 'OR',
     'separator' => 0,
