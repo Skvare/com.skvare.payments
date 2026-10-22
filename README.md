@@ -1,65 +1,116 @@
-# Bulk Payments Retry Extension
+# Bulk Payment Retry
 
-A CiviCRM extension for retrying failed payment transactions by processing transaction IDs from system logs. This extension provides a bulk payment retry interface that looks up failed transaction data in the system log table and reprocesses payment submissions.
+A CiviCRM extension that replays logged payment notifications (IPNs) for a
+list of transaction IDs. Use it when a payment processor notification reached
+CiviCRM but failed to record the payment.
 
-## Features
-
-- Bulk processing of failed transaction IDs
-- Integration with system logs to retrieve transaction context
-- Retry payment processing through notification logs
-- Visual feedback with processing status (Processed, Already Processed, Failed to retry, Not Found)
-- CSV export functionality for processed payment data
-- Navigation menu integration under Contributions
-
-This extension requires the `nz.co.fuzion.notificationlog` extension.
+CiviCRM logs every incoming payment notification in `civicrm_system_log`. This
+extension finds the notifications that contain the transaction IDs you paste,
+and replays each one with the `NotificationLog.retry` API from
+[nz.co.fuzion.notificationlog](https://github.com/eileenmcnaughton/nz.co.fuzion.notificationlog).
 
 The extension is licensed under [AGPL-3.0](LICENSE.txt).
 
 ## Requirements
 
-* PHP v7.0+
-* CiviCRM v5.0+
-* Extension: nz.co.fuzion.notificationlog
+* CiviCRM 6.16 or later
+* PHP 8.2 or later
+* Extension: `nz.co.fuzion.notificationlog`
 
-## Installation (Web UI)
+## Supported processors
 
-This extension has not yet been published for installation via the web UI.
+`NotificationLog.retry` can only replay notifications from these processor
+types:
 
-## Installation (CLI, Zip)
+* PayPal (Website Payments Pro)
+* PayPal Standard
+* Authorize.Net, the legacy processor built into core (silent post)
 
-Sysadmins and developers may download the `.zip` file for this extension and
-install it with the command-line tool [cv](https://github.com/civicrm/cv).
+It cannot replay Stripe or the Authorize.Net (authnet) extension. For those,
+use the processors' own tools:
+
+* **Stripe:** the `Stripe.Ipn` API (`id` = system log ID, or `evtid` + `ppid`).
+* **Stripe and authnet:** the payment processor webhook queue
+  (`civicrm_paymentprocessor_webhook`) and its "Retry" task, provided by
+  mjwshared, or authnet's `AuthnetUtilities.Retry` API.
+
+Transaction IDs from those processors are reported as "Not found".
+
+## Installation
+
+On sites managed with composer, add the extension to the project's
+`composer.json`. Otherwise install it with [cv](https://github.com/civicrm/cv):
 
 ```bash
 cd <extension-dir>
 cv dl com.skvare.payments@https://github.com/Skvare/com.skvare.payments/archive/master.zip
-```
-
-## Installation (CLI, Git)
-
-Sysadmins and developers may clone the [Git](https://en.wikipedia.org/wiki/Git) repo for this extension and
-install it with the command-line tool [cv](https://github.com/civicrm/cv).
-
-```bash
-git clone https://github.com/Skvare/com.skvare.payments.git
 cv en payments
 ```
 
 ## Usage
 
-1. Navigate to **Contributions → Bulk Payment retry** in the CiviCRM menu
-2. Enter failed transaction IDs in the textarea (comma-separated or one per line)
-3. Optionally check:
-   - **Download Processed Data**: Export results as CSV
-   - **Debug**: Enable debug mode for troubleshooting
-4. Click **Submit** to process the transactions
+1. Go to **Contributions → Bulk Payment Retry**
+   (`civicrm/failedpayment/retry`). This needs the `administer CiviCRM`
+   permission.
+2. Paste the transaction IDs, separated by spaces, commas or new lines, up to
+   100 at a time. Each ID must be at least 6 characters long and contain only
+   letters, digits, `.`, `_` or `-`.
+3. Optionally tick:
+   * **Download Processed Data:** get the results as `Processed_Payment.csv`
+     instead of a table.
+   * **Debug:** show the full output of the processor's notification handler
+     in the Detail column. Without it, the output is cut to 200 characters.
+4. Click **Submit**.
 
-The system will:
-- Look up each transaction ID in the system logs
-- Extract contact information from the transaction context
-- Retry payment processing through the notification log
-- Display results showing transaction status for each ID
+An ID matches a logged notification only when it appears there as a complete
+value (for example `txn_id`, `parent_txn_id` or `recurring_payment_id`), never
+as part of a longer value. A recurring profile ID such as `I-…` matches every
+notification of that profile. Every matching notification is checked and,
+where safe, replayed in log order. Each one gets its own row in the result.
 
+Run the retry from the site of the domain whose processor received the
+notification.
+
+## Results
+
+| Status | Meaning |
+| --- | --- |
+| Not found | No PayPal or legacy Authorize.Net notification in the log has this ID. |
+| Unreadable log entry | The logged notification is empty or not valid JSON. Not replayed. |
+| Other domain | The notification was received by another domain's processor. Not replayed; run the retry from that domain's site. |
+| Already recorded | A contribution, or a payment on a contribution, already has the notification's transaction ID (`txn_id` / `x_trans_id`). Not replayed. |
+| Possibly recorded | PayPal Pro recurring payment: the same recurring series has a completed contribution with the same amount, no transaction ID and a receive date within a day. Not replayed, because PayPal Pro would record it again. Record it manually if it really is a different payment. |
+| Processed | Replayed, and a contribution now has the transaction ID. |
+| Retried, nothing recorded | Replayed, but no contribution has the transaction ID. The Detail column shows what the processor's handler printed (for example "Invalid or missing data"). |
+| Retried | Replayed. The notification has no transaction ID to check (for example a profile created or expired notification). |
+| Failed | The retry API threw an error, shown in the Detail column. |
+
+Notes:
+
+* Each replay is written to the CiviCRM log, with the user, system log ID,
+  transaction ID and result.
+* The `com.skvare.memberships` signup-page session flags are cleared during a
+  replay. Otherwise that extension removes the line items of a replayed
+  installment.
+* "Processor" shows `(domain not checked)` for notifications logged as
+  `processor_name=…`, which carry no processor ID.
+
+## Known limitations
+
+* **PayPal Pro event installments cannot be replayed.** CiviCRM core rejects
+  recurring notifications whose `rp_invoice_id` has `m=event` but no `e` and
+  `p` values, with "Failure: Missing Parameter e". These end as "Retried,
+  nothing recorded" with the output "Invalid or missing data", and have to be
+  recorded manually.
+* **Searching is not instant.** `civicrm_system_log` has no index on the
+  notification text, so every submission scans the replayable processors'
+  notifications.
+* **The retry API has PHP 8 warnings.** `NotificationLog.retry` itself warns
+  about an undefined `$processorId` for `processor_name=` notifications.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## Support and Contributing
 
@@ -94,4 +145,3 @@ You might also be interested in other Skvare CiviCRM extensions:
 - **Unlink User Account**: Safely unlink user accounts from contacts without deleting data
 
 For a complete list of our open source contributions, visit our [GitHub organization page](https://github.com/Skvare).
-

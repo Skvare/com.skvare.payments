@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <extension key="com.skvare.payments" type="module">
   <file>payments</file>
-  <name>Bulk Payments retry</name>
-  <description>Bulk Payments retry</description>
+  <name>Bulk Payment Retry</name>
+  <description>Replays logged PayPal and legacy Authorize.Net payment notifications for a list of transaction IDs, so payments whose notification failed get recorded. Skips notifications whose payment is already recorded.</description>
   <license>AGPL-3.0</license>
   <maintainer>
     <author>Sunil Pawar</author>
@@ -10,20 +10,27 @@
   </maintainer>
   <urls>
     <url desc="Main Extension Page">https://github.com/Skvare/com.skvare.payments</url>
-    <url desc="Documentation">https://github.com/Skvare/com.skvare.payments</url>
-    <url desc="Support">https://github.com/Skvare/com.skvare.payments</url>
+    <url desc="Documentation">https://github.com/Skvare/com.skvare.payments/blob/civicrm_6_16/README.md</url>
+    <url desc="Support">https://github.com/Skvare/com.skvare.payments/issues</url>
     <url desc="Licensing">http://www.gnu.org/licenses/agpl-3.0.html</url>
   </urls>
-  <releaseDate>2025-07-23</releaseDate>
-  <version>1.1</version>
-  <develStage>alpha</develStage>
+  <releaseDate>2026-10-22</releaseDate>
+  <version>1.2.0</version>
+  <develStage>stable</develStage>
   <compatibility>
     <ver>6.16</ver>
   </compatibility>
+  <php_compatibility>
+    <ver>8.2</ver>
+    <ver>8.3</ver>
+  </php_compatibility>
+  <smarty_compatibility>
+    <ver>5</ver>
+  </smarty_compatibility>
   <requires>
     <ext>nz.co.fuzion.notificationlog</ext>
   </requires>
-  <comments>This is a new, undeveloped module</comments>
+  <comments>Replays only what NotificationLog.retry supports (PayPal, PayPal Standard, legacy Authorize.Net). See README.md.</comments>
   <classloader>
     <psr0 prefix="CRM_" path="."/>
   </classloader>
