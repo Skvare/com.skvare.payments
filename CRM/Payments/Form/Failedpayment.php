@@ -210,18 +210,134 @@ class CRM_Payments_Form_Failedpayment extends CRM_Core_Form {
       return self::reportRow($trnxID, $entry, E::ts('Other domain'), E::ts('Processor %1 belongs to domain %2. Run the retry from that site.', [1 => $processor['id'], 2 => $processor['domain_id']]), $contactID);
     }
 
+    // Replaying a payment that is already recorded is not harmless: PayPal
+    // Pro re-saves the recurring record before the duplicate trxn_id fails.
+    $logTrxnID = $context['txn_id'] ?? $context['x_trans_id'] ?? '';
+    $logTrxnID = is_string($logTrxnID) ? $logTrxnID : '';
+    if ($logTrxnID && ($contribution = self::findContribution($logTrxnID))) {
+      return self::reportRow($trnxID, $entry, E::ts('Already recorded'), E::ts('Contribution %1 already has transaction %2.', [1 => $contribution['id'], 2 => $logTrxnID]), $contactID ?: $contribution['contact_id']);
+    }
+    if ($contribution = self::findUntrackedRecurPayment($context)) {
+      return self::reportRow($trnxID, $entry, E::ts('Possibly recorded'), E::ts('Contribution %1 in the same recurring series has the same amount and a receive date within a day of this payment, but no transaction ID. Not replayed: if it is a different payment, record it manually.', [1 => $contribution['id']]), $contactID ?: $contribution['contact_id']);
+    }
+
+    [$output, $error] = $this->replay((int) $entry['id']);
+    // The IPN classes catch their own exceptions and only echo a message, so
+    // the result of NotificationLog.retry says nothing about the payment.
+    if ($error) {
+      $status = E::ts('Failed');
+      $detail = $error;
+    }
+    elseif (!$logTrxnID) {
+      $status = E::ts('Retried');
+      $detail = E::ts('The notification has no transaction ID to verify.');
+    }
+    elseif ($contribution = self::findContribution($logTrxnID)) {
+      $status = E::ts('Processed');
+      $detail = E::ts('Recorded as contribution %1.', [1 => $contribution['id']]);
+      $contactID = $contactID ?: $contribution['contact_id'];
+    }
+    else {
+      $status = E::ts('Retried, nothing recorded');
+      $detail = E::ts('No contribution has transaction %1.', [1 => $logTrxnID]);
+    }
+    if ($output !== '') {
+      $detail .= ' ' . E::ts('Output: %1', [1 => $debug ? $output : CRM_Utils_String::ellipsify($output, 200)]);
+    }
+    Civi::log()->info('Bulk payment retry by contact {user}: system log {log} ({trxn}): {status}. {detail}', [
+      'user' => CRM_Core_Session::getLoggedInContactID(),
+      'log' => $entry['id'],
+      'trxn' => $trnxID,
+      'status' => $status,
+      'detail' => $detail,
+    ]);
+    return self::reportRow($trnxID, $entry, $status, $detail, $contactID);
+  }
+
+  /**
+   * Run NotificationLog.retry for one log entry.
+   *
+   * @param int $logID
+   *
+   * @return array
+   *   [output echoed by the IPN class, error message or ''].
+   */
+  protected function replay(int $logID): array {
+    $error = '';
+    ob_start();
     try {
-      $resultNotificationLog = civicrm_api3('NotificationLog', 'retry', [
-        'system_log_id' => $entry['id'],
+      civicrm_api3('NotificationLog', 'retry', ['system_log_id' => $logID]);
+    }
+    catch (\Throwable $e) {
+      $error = $e->getMessage();
+    }
+    $output = trim(strip_tags((string) ob_get_clean()));
+    return [$output, $error];
+  }
+
+  /**
+   * Find the contribution a payment transaction ID was recorded on.
+   *
+   * @param string $trxnID
+   *
+   * @return array|null
+   *   id and contact_id, or NULL.
+   */
+  protected static function findContribution(string $trxnID): ?array {
+    $dao = CRM_Core_DAO::executeQuery("
+      SELECT c.id, c.contact_id
+      FROM civicrm_contribution c
+      WHERE c.trxn_id = %1
+      UNION
+      SELECT c.id, c.contact_id
+      FROM civicrm_financial_trxn ft
+      INNER JOIN civicrm_entity_financial_trxn eft ON eft.financial_trxn_id = ft.id AND eft.entity_table = 'civicrm_contribution'
+      INNER JOIN civicrm_contribution c ON c.id = eft.entity_id
+      WHERE ft.trxn_id = %1 AND ft.is_payment = 1
+      LIMIT 1", [1 => [$trxnID, 'String']]);
+    return $dao->fetch() ? ['id' => (int) $dao->id, 'contact_id' => (int) $dao->contact_id] : NULL;
+  }
+
+  /**
+   * Find a completed recurring payment that was recorded without trxn_id.
+   *
+   * A PayPal Pro installment completed at sign-up can have no trxn_id. Once
+   * the series' first contribution is completed, PayPalProIPN records every
+   * replayed recurring_payment as a new contribution, so replaying the
+   * notification for that installment would record the payment twice.
+   *
+   * @param array $context
+   *   Decoded notification.
+   *
+   * @return array|null
+   *   id and contact_id, or NULL.
+   */
+  protected static function findUntrackedRecurPayment(array $context): ?array {
+    if (empty($context['rp_invoice_id']) || !is_string($context['rp_invoice_id']) || empty($context['payment_date']) || !is_string($context['payment_date'])) {
+      return NULL;
+    }
+    parse_str($context['rp_invoice_id'], $invoice);
+    $recurID = (int) ($invoice['r'] ?? 0);
+    $paid = strtotime($context['payment_date']);
+    $amount = $context['mc_gross'] ?? $context['amount'] ?? NULL;
+    if (!$recurID || !$paid || !is_numeric($amount)) {
+      return NULL;
+    }
+    $dao = CRM_Core_DAO::executeQuery("
+      SELECT id, contact_id
+      FROM civicrm_contribution
+      WHERE contribution_recur_id = %1 AND total_amount = %2 AND contribution_status_id = %3
+        AND (trxn_id IS NULL OR trxn_id = '')
+        AND receive_date BETWEEN %4 AND %5
+      ORDER BY id
+      LIMIT 1", [
+        1 => [$recurID, 'Integer'],
+        2 => [$amount, 'Float'],
+        3 => [CRM_Core_PseudoConstant::getKey('CRM_Contribute_BAO_Contribution', 'contribution_status_id', 'Completed'), 'Integer'],
+        4 => [date('YmdHis', $paid - 86400), 'Timestamp'],
+        5 => [date('YmdHis', $paid + 86400), 'Timestamp'],
       ]);
-      if ($debug) {
-        echo '<pre>NotificationLog : '; print_r($resultNotificationLog); echo '</pre>';
-      }
-      return self::reportRow($trnxID, $entry, E::ts('Processed'), '', $contactID);
-    }
-    catch (CRM_Core_Exception $e) {
-      return self::reportRow($trnxID, $entry, E::ts('Failed'), $e->getMessage(), $contactID);
-    }
+    return $dao->fetch() ? ['id' => (int) $dao->id, 'contact_id' => (int) $dao->contact_id] : NULL;
   }
 
   /**
