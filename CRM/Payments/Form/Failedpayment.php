@@ -146,107 +146,151 @@ class CRM_Payments_Form_Failedpayment extends CRM_Core_Form {
   public function postProcess() {
     $values = $this->exportValues();
     $finalReport = [];
-    if (!empty($values['trns_ids'])) {
-      $trns_ids = self::parseTransactionIds($values['trns_ids']);
-      $logEntries = self::findLogEntries($trns_ids);
-      foreach ($trns_ids as $trnxID) {
-        $lineData = [];
-        $contactID = '';
-        $lineData['trxid'] = $trnxID;
-        try {
-          if ($logEntries[$trnxID]) {
-            foreach ($logEntries[$trnxID] as $value) {
-              $value['context'] = json_decode($value['context'], TRUE);
-              if (array_key_exists('rp_invoice_id', $value['context'])) {
-                $ipn = $value['context']['rp_invoice_id'];
-                parse_str($ipn, $output);
-                $contactID = $output['c'];
-                $lineData['cid'] = $contactID;
-              }
-              else {
-                $lineData['cid'] = '';
-              }
-              try {
-                $resultNotificationLog = civicrm_api3('NotificationLog', 'retry', [
-                  'system_log_id' => $value['id'],
-                ]);
-                if (!empty($values['debug'])) {
-                  echo '<pre>NotificationLog : '; print_r($resultNotificationLog); echo '</pre>';
-                }
-                if (!$resultNotificationLog['is_error']) {
-                  $lineData['status'] = 'Processed';
-                }
-                else {
-                  if ($resultNotificationLog['error_message'] == 'This transaction has already been processed') {
-                    $lineData['status'] = 'Already Processed';
-                  }
-                  else {
-                    $lineData['status'] = 'Failed to retry';
-                  }
-                }
-              }
-              catch (CiviCRM_API3_Exception $e) {
-                if (!empty($values['debug'])) {
-                  echo '<pre>debug 1 getMessage : '; print_r($e->getMessage()); echo '</pre>';
-                }
-                if ($e->getMessage() == 'This transaction has already been processed') {
-                  $lineData['status'] = 'Already Processed';
-                }
-                else {
-                  $lineData['status'] = 'Not Found 1';
-                }
-                if (empty($contactID)) {
-                  $lineData['cid'] = '';
-                }
-              }
-            }
-          }
-          else {
-            $lineData['cid'] = '';
-            $lineData['status'] = 'Not Found 2';
-          }
-          $finalReport[] = $lineData;
-        }
-        catch (CiviCRM_API3_Exception $e) {
-          $lineData['cid'] = '';
-          $lineData['status'] = 'Not Found 3';
-          if (!empty($values['debug'])) {
-            echo '<pre>debug 3 getMessage'; print_r($e->getMessage()); echo '</pre>';
-          }
-        }
+    foreach (self::findLogEntries(self::parseTransactionIds($values['trns_ids'] ?? '')) as $trnxID => $entries) {
+      if (!$entries) {
+        $finalReport[] = self::reportRow($trnxID, NULL, E::ts('Not found'), E::ts('No PayPal or legacy Authorize.Net notification in the log has this ID. Stripe and Authorize.Net (authnet extension) notifications cannot be replayed here: use the Stripe.Ipn API or the payment processor webhook retry.'));
+        continue;
       }
-      if (!empty($values['download_csv'])) {
-        $fileName = 'Processed_Payment.csv';
-        $columnsHeader = ['Trns ID', 'Contact ID', 'Status'];
-        CRM_Core_Report_Excel::writeCSVFile($fileName, $columnsHeader, $finalReport);
-        exit;
-      }
-      else {
-        $htm = '<table class="selector">
-        <tr>
-        <th>Trns ID</th>
-        <th>Contact ID</th>
-        <th>Status</th>
-        </tr>';
-        foreach ($finalReport as $report) {
-          $htm .= '<tr>';
-          $htm .= '<td>' . $report['trxid'] . '</td>';
-          if (!empty($report['cid'])) {
-            $url = CRM_Utils_System::url("civicrm/contact/view", "reset=1&cid=" . $report['cid']);
-            $report['cid'] = "<a href='{$url}' target='_blank'>" . $report['cid'] . "</a>";
-          }
-          $htm .= '<td>' . $report['cid'] . '</td>';
-          $htm .= '<td>' . $report['status'] . '</td>';
-          $htm .= '</tr>';
-        }
-        $htm .= '</table>';
-        $smarty = CRM_Core_Smarty::singleton();
-        $smarty->assign('reportData', $htm);
+      foreach ($entries as $entry) {
+        $finalReport[] = $this->processLogEntry($trnxID, $entry, !empty($values['debug']));
       }
     }
+    $columns = [E::ts('Transaction ID'), E::ts('Log ID'), E::ts('Log Date'), E::ts('Processor'), E::ts('Contact ID'), E::ts('Status'), E::ts('Detail')];
+    if (!empty($values['download_csv'])) {
+      CRM_Core_Report_Excel::writeCSVFile('Processed_Payment.csv', $columns, $finalReport);
+      exit;
+    }
+    $htm = '<table class="selector"><tr>';
+    foreach ($columns as $column) {
+      $htm .= '<th>' . htmlspecialchars($column) . '</th>';
+    }
+    $htm .= '</tr>';
+    foreach ($finalReport as $report) {
+      $htm .= '<tr>';
+      foreach ($report as $key => $value) {
+        $cell = htmlspecialchars((string) $value);
+        if ($key === 'contact_id' && $value) {
+          $url = CRM_Utils_System::url('civicrm/contact/view', 'reset=1&cid=' . (int) $value);
+          $cell = "<a href='{$url}' target='_blank'>{$cell}</a>";
+        }
+        $htm .= '<td>' . $cell . '</td>';
+      }
+      $htm .= '</tr>';
+    }
+    $htm .= '</table>';
+    $smarty = CRM_Core_Smarty::singleton();
+    $smarty->assign('reportData', $htm);
     parent::postProcess();
   }
 
+  /**
+   * Replay one logged notification, unless it must be skipped.
+   *
+   * @param string $trnxID
+   *   The pasted transaction ID that matched this log entry.
+   * @param array $entry
+   *   civicrm_system_log row: id, message, context, timestamp.
+   * @param bool $debug
+   *
+   * @return array
+   *   Report row.
+   */
+  protected function processLogEntry(string $trnxID, array $entry, bool $debug): array {
+    $context = json_decode($entry['context'], TRUE);
+    if (!is_array($context)) {
+      return self::reportRow($trnxID, $entry, E::ts('Unreadable log entry'), E::ts('The logged notification could not be decoded.'));
+    }
+    $contactID = '';
+    if (!empty($context['rp_invoice_id']) && is_string($context['rp_invoice_id'])) {
+      parse_str($context['rp_invoice_id'], $invoice);
+      $contactID = $invoice['c'] ?? '';
+    }
+    $processor = self::getProcessor($entry['message']);
+    if ($processor['domain_id'] && $processor['domain_id'] != CRM_Core_Config::domainID()) {
+      return self::reportRow($trnxID, $entry, E::ts('Other domain'), E::ts('Processor %1 belongs to domain %2. Run the retry from that site.', [1 => $processor['id'], 2 => $processor['domain_id']]), $contactID);
+    }
+
+    try {
+      $resultNotificationLog = civicrm_api3('NotificationLog', 'retry', [
+        'system_log_id' => $entry['id'],
+      ]);
+      if ($debug) {
+        echo '<pre>NotificationLog : '; print_r($resultNotificationLog); echo '</pre>';
+      }
+      return self::reportRow($trnxID, $entry, E::ts('Processed'), '', $contactID);
+    }
+    catch (CRM_Core_Exception $e) {
+      return self::reportRow($trnxID, $entry, E::ts('Failed'), $e->getMessage(), $contactID);
+    }
+  }
+
+  /**
+   * Get the processor a log message refers to.
+   *
+   * Parses the message the same way NotificationLog.retry does.
+   *
+   * @param string $message
+   *
+   * @return array
+   *   id (NULL for processor_name= messages), name, type, domain_id.
+   */
+  protected static function getProcessor(string $message): array {
+    if (!isset(\Civi::$statics[__CLASS__]['processors'][$message])) {
+      $processor = ['id' => NULL, 'name' => '', 'type' => '', 'domain_id' => NULL];
+      if (str_starts_with($message, 'payment_notification processor_name=')) {
+        $processor['type'] = substr($message, strlen('payment_notification processor_name='));
+      }
+      elseif ($message === 'payment_notification PayPal_Standard') {
+        $processor['type'] = 'PayPal_Standard';
+      }
+      elseif (str_starts_with($message, 'payment_notification processor_id=')) {
+        $processor['id'] = (int) substr($message, strlen('payment_notification processor_id='));
+        $dao = CRM_Core_DAO::executeQuery('
+          SELECT pp.name, pp.domain_id, ppt.name AS type
+          FROM civicrm_payment_processor pp
+          INNER JOIN civicrm_payment_processor_type ppt ON ppt.id = pp.payment_processor_type_id
+          WHERE pp.id = %1', [1 => [$processor['id'], 'Integer']]);
+        if ($dao->fetch()) {
+          $processor['name'] = $dao->name;
+          $processor['type'] = $dao->type;
+          $processor['domain_id'] = (int) $dao->domain_id;
+        }
+      }
+      \Civi::$statics[__CLASS__]['processors'][$message] = $processor;
+    }
+    return \Civi::$statics[__CLASS__]['processors'][$message];
+  }
+
+  /**
+   * Build a report row.
+   *
+   * @param string $trnxID
+   * @param array|null $entry
+   *   civicrm_system_log row, or NULL when nothing matched.
+   * @param string $status
+   * @param string $detail
+   * @param int|string $contactID
+   *
+   * @return array
+   *   Values in report column order.
+   */
+  protected static function reportRow(string $trnxID, ?array $entry, string $status, string $detail = '', $contactID = ''): array {
+    $processor = $entry ? self::getProcessor($entry['message']) : NULL;
+    $processorLabel = '';
+    if ($processor) {
+      $processorLabel = $processor['id'] ? "{$processor['type']} #{$processor['id']}" : $processor['type'];
+      $processorLabel .= ' ' . ($processor['domain_id'] ? E::ts('(domain %1)', [1 => $processor['domain_id']]) : E::ts('(domain not checked)'));
+    }
+    return [
+      'trxid' => $trnxID,
+      'log_id' => $entry['id'] ?? '',
+      'log_date' => $entry['timestamp'] ?? '',
+      'processor' => $processorLabel,
+      'contact_id' => $contactID,
+      'status' => $status,
+      'detail' => $detail,
+    ];
+  }
 
   /**
    * Get the fields/elements defined in this form.
